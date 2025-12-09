@@ -1,0 +1,224 @@
+// ...existing code...
+module elevator_top (
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire        SW0,
+    input  wire        SW11,
+    input  wire        KEY0,
+    input  wire        KEY1,
+    input  wire        KEY2,
+    input  wire        KEY3,
+    output reg         LED0,
+    output reg         LED1,
+    output reg         LED2,
+    output reg         LED3,
+    output wire [7:0]  seg_state,
+    output wire [7:0]  seg_floor
+);
+    localparam int unsigned CLK_FREQ_HZ        = 50_000_000;
+    localparam int unsigned RUN_SECONDS        = 4;
+    localparam logic [31:0] RUN_TICKS_CONST    = CLK_FREQ_HZ * RUN_SECONDS;
+    localparam logic [31:0] ON_SHOW_TICKS_CONST= (CLK_FREQ_HZ >= 2) ? (CLK_FREQ_HZ >> 1) : 32'd1;
+
+    localparam logic FLOOR_1 = 1'b0;
+    localparam logic FLOOR_2 = 1'b1;
+
+    typedef enum logic [2:0] {
+        ST_IDLE_1  = 3'd0,
+        ST_IDLE_2  = 3'd1,
+        ST_UP      = 3'd2,
+        ST_DOWN    = 3'd3,
+        ST_FORCE_1 = 3'd4
+    } state_t;
+
+    typedef enum logic [2:0] {
+        DISP_OFF  = 3'd0,
+        DISP_ON   = 3'd1,
+        DISP_IDLE = 3'd2,
+        DISP_UP   = 3'd3,
+        DISP_DOWN = 3'd4
+    } disp_sel_t;
+
+    wire start_en           = (SW0  == 1'b1);
+    wire force_reset_active = (SW11 == 1'b0);
+    wire ready_for_input    = start_en && !force_reset_active;
+
+    wire key0_pulse, key1_pulse, key2_pulse, key3_pulse;
+    key_filter u_key0 (.clk(clk), .rst_n(rst_n), .key_in(KEY0), .key_pulse(key0_pulse));
+    key_filter u_key1 (.clk(clk), .rst_n(rst_n), .key_in(KEY1), .key_pulse(key1_pulse));
+    key_filter u_key2 (.clk(clk), .rst_n(rst_n), .key_in(KEY2), .key_pulse(key2_pulse));
+    key_filter u_key3 (.clk(clk), .rst_n(rst_n), .key_in(KEY3), .key_pulse(key3_pulse));
+
+    state_t state, next_state;
+    logic   cur_floor;
+    logic   req_to_1, req_to_2;
+
+    logic [31:0] motion_cnt;
+    logic [31:0] force_target_ticks;
+    logic [31:0] current_target;
+    logic [31:0] force_ticks_needed;
+
+    logic        force_reset_d;
+    wire         force_reset_rise;
+
+    logic        start_prev;
+    logic [31:0] on_cnt;
+    wire         show_on_active;
+
+    wire motion_active      = (state == ST_UP) || (state == ST_DOWN) || (state == ST_FORCE_1);
+    assign current_target   = (state == ST_FORCE_1) ? force_target_ticks : RUN_TICKS_CONST;
+    wire motion_target_zero = (current_target == 32'd0);
+    wire motion_done_pulse  = motion_active &&
+                              (motion_target_zero ? 1'b1 : (motion_cnt == current_target - 1));
+
+    wire move_up_done       = (state == ST_UP)      && motion_done_pulse;
+    wire move_down_done     = (state == ST_DOWN)    && motion_done_pulse;
+    wire force_done         = (state == ST_FORCE_1) && motion_done_pulse;
+    wire arrive_floor2_pulse= move_up_done;
+    wire arrive_floor1_pulse= move_down_done || force_done;
+
+    wire allow_req_to_1     = ready_for_input && (state != ST_IDLE_1);
+    wire allow_req_to_2     = ready_for_input && (state != ST_IDLE_2);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) motion_cnt <= 32'd0;
+        else if (!motion_active || motion_target_zero || motion_done_pulse) motion_cnt <= 32'd0;
+        else motion_cnt <= motion_cnt + 1'b1;
+    end
+
+    always @(*) begin
+        unique case (state)
+            ST_IDLE_1: force_ticks_needed = (cur_floor == FLOOR_1) ? 32'd0 : RUN_TICKS_CONST;
+            ST_IDLE_2: force_ticks_needed = (cur_floor == FLOOR_2) ? RUN_TICKS_CONST : 32'd0;
+            ST_UP:     force_ticks_needed = motion_cnt;
+            ST_DOWN:   force_ticks_needed = (RUN_TICKS_CONST > motion_cnt) ? (RUN_TICKS_CONST - motion_cnt) : 32'd0;
+            ST_FORCE_1:force_ticks_needed = (force_target_ticks > motion_cnt) ? (force_target_ticks - motion_cnt) : 32'd0;
+            default:   force_ticks_needed = (cur_floor == FLOOR_2) ? RUN_TICKS_CONST : 32'd0;
+        endcase
+    end
+    wire force_move_required = force_reset_active && (force_ticks_needed != 32'd0);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) force_reset_d <= 1'b0;
+        else force_reset_d <= force_reset_active;
+    end
+    assign force_reset_rise = force_reset_active && !force_reset_d;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) force_target_ticks <= 32'd0;
+        else if (force_reset_rise) force_target_ticks <= force_ticks_needed;
+        else if (!force_reset_active || force_done) force_target_ticks <= 32'd0;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) state <= ST_IDLE_1;
+        else state <= next_state;
+    end
+
+    always @(*) begin
+        next_state = state;
+        if (force_reset_active) begin
+            next_state = force_move_required ? ST_FORCE_1 : ST_IDLE_1;
+        end else if (!start_en) begin
+            next_state = (cur_floor == FLOOR_2) ? ST_IDLE_2 : ST_IDLE_1;
+        end else begin
+            unique case (state)
+                ST_IDLE_1: next_state = req_to_2 ? ST_UP  : ST_IDLE_1;
+                ST_IDLE_2: next_state = req_to_1 ? ST_DOWN: ST_IDLE_2;
+                ST_UP:     next_state = move_up_done   ? (req_to_1 ? ST_DOWN : ST_IDLE_2) : ST_UP;
+                ST_DOWN:   next_state = move_down_done ? (req_to_2 ? ST_UP   : ST_IDLE_1) : ST_DOWN;
+                ST_FORCE_1:next_state = force_done ? ST_IDLE_1 : ST_FORCE_1;
+                default:   next_state = ST_IDLE_1;
+            endcase
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) cur_floor <= FLOOR_1;
+        else if (force_reset_active && !force_move_required) cur_floor <= FLOOR_1;
+        else if (move_up_done) cur_floor <= FLOOR_2;
+        else if (arrive_floor1_pulse) cur_floor <= FLOOR_1;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n || force_reset_active || !start_en) req_to_1 <= 1'b0;
+        else if (arrive_floor1_pulse) req_to_1 <= 1'b0;
+        else if (allow_req_to_1 && (key0_pulse || key2_pulse)) req_to_1 <= 1'b1;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n || force_reset_active || !start_en) req_to_2 <= 1'b0;
+        else if (arrive_floor2_pulse) req_to_2 <= 1'b0;
+        else if (allow_req_to_2 && (key1_pulse || key3_pulse)) req_to_2 <= 1'b1;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n || force_reset_active || !start_en) LED0 <= 1'b0;
+        else if (arrive_floor1_pulse) LED0 <= 1'b0;
+        else if (allow_req_to_1 && key0_pulse) LED0 <= 1'b1;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n || force_reset_active || !start_en) LED2 <= 1'b0;
+        else if (arrive_floor1_pulse) LED2 <= 1'b0;
+        else if (allow_req_to_1 && key2_pulse) LED2 <= 1'b1;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n || force_reset_active || !start_en) LED1 <= 1'b0;
+        else if (arrive_floor2_pulse) LED1 <= 1'b0;
+        else if (allow_req_to_2 && key1_pulse) LED1 <= 1'b1;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n || force_reset_active || !start_en) LED3 <= 1'b0;
+        else if (arrive_floor2_pulse) LED3 <= 1'b0;
+        else if (allow_req_to_2 && key3_pulse) LED3 <= 1'b1;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) start_prev <= 1'b0;
+        else start_prev <= start_en;
+    end
+    wire start_rise = start_en && !start_prev;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) on_cnt <= 32'd0;
+        else if (!start_en) on_cnt <= 32'd0;
+        else if (start_rise) on_cnt <= ON_SHOW_TICKS_CONST;
+        else if (on_cnt != 32'd0) on_cnt <= on_cnt - 1'b1;
+    end
+    assign show_on_active = (on_cnt != 32'd0);
+
+    disp_sel_t disp_sel;
+    always @(*) begin
+        if (!start_en) disp_sel = DISP_OFF;
+        else if (show_on_active) disp_sel = DISP_ON;
+        else begin
+            unique case (state)
+                ST_UP:        disp_sel = DISP_UP;
+                ST_DOWN,
+                ST_FORCE_1:   disp_sel = DISP_DOWN;
+                default:      disp_sel = DISP_IDLE;
+            endcase
+        end
+    end
+
+    logic [3:0] floor_value;
+    always @(*) floor_value = (cur_floor == FLOOR_2) ? 4'd2 : 4'd1;
+
+    seg_state_driver u_seg_state (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .state_code(disp_sel),
+        .seg       (seg_state)
+    );
+
+    seg_floor_driver u_seg_floor (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .floor_code (floor_value),
+        .seg        (seg_floor)
+    );
+endmodule
+// ...existing code...
