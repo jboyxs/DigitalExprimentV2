@@ -78,6 +78,13 @@ module fsm(
                 else begin
                     case ({xdkey[0], xdkey[2], rst})
                         3'b000: next_state = ST_IDLE_2;
+                        3'b001: next_state = ST_FORCE_1; // 复位，强制回1楼
+                        3'b010: next_state = ST_DOWN;
+                        3'b100: next_state = ST_DOWN;
+                        3'b011: next_state = ST_FORCE_1;
+                        3'b101: next_state = ST_FORCE_1; // 复位
+                        3'b110: next_state = ST_DOWN;
+                        3'b111: next_state = ST_FORCE_1; // 复位
                         default: next_state = ST_DOWN;
                     endcase
                 end
@@ -95,8 +102,11 @@ module fsm(
 
             // 下行过程
             ST_DOWN: begin
-                case (timeend)
-                    1'b0: next_state = ST_DOWN;
+                case ({timeend,rst})
+                    2'b00: next_state = ST_DOWN;
+                    2'b01: next_state = ST_FORCE_1; // 复位，强制回1楼
+                    2'b10: next_state = ST_IDLE_1;   // 到1楼
+                    2'b11: next_state = ST_FORCE_1; // 复位，
                     default: next_state = ST_IDLE_1;  // 到1楼
                 endcase
             end
@@ -114,20 +124,34 @@ module fsm(
     end 
 
     // 计数器：用于模拟运行时间
-    reg [CntWidth-1:0] cntmark;
+    // reg [CntWidth-1:0] cntmark;
     reg [CntWidth-1:0] cnt;
+    // reg [CntWidth-1:0] cntmaxforce;
+    reg homeback;
     always @(posedge clk ) begin
         if(en) begin
             cnt <= CntMax-1;
             timeend <=0;
+            homeback<=0;
         end
         else begin
             case(state)
-                ST_UP,ST_DOWN: begin
+                ST_UP: begin
                     if(cnt > 0) begin
                         cnt <= cnt - 1;
                         timeend <=0;
-                        cntmark<=cnt;
+                        // cntmark<=cnt;
+                    end
+                    else begin
+                        cnt <= cnt;
+                        timeend <=1;
+                    end
+                end
+                ST_DOWN: begin
+                    if(cnt < CntMax-1) begin
+                        cnt <= cnt +1;
+                        timeend <=0;
+                        // cntmark<=cnt;
                     end
                     else begin
                         cnt <= cnt;
@@ -135,15 +159,21 @@ module fsm(
                     end
                 end
 
-                ST_FORCE_1:begin//这个也要改
-                    if(cnt>=CntMax-1) begin
-                        cnt<=cnt;
-                        timeend <=1;
-                    end
-                    else begin
+                ST_FORCE_1:begin//这个计数逻辑要改，从倒计改成正计
+                    if(cnt<CntMax-1) begin
                         cnt<=cnt+1;
                         timeend <=0;
+                        homeback<=1;
                     end
+                    else begin
+                        cnt<=cnt;
+                        timeend <=1;
+                        homeback<=0;
+                    end
+               end
+               ST_IDLE_2:begin
+                    cnt <= 0;
+                    timeend <=0;
                end
 
                 default: begin
@@ -154,7 +184,17 @@ module fsm(
             endcase
         end
 end
-
+//定时器2
+reg [CntWidth-1:0] cntv;
+always @(posedge clk) begin
+if(!homeback)begin
+    cntv<=0;
+end
+else begin
+    cntv<=cntv+1;
+end
+    
+end
     // 输出逻辑（位置 / 状态 / LED）
     always @(posedge clk) begin
         if (en) begin
@@ -175,10 +215,10 @@ end
                     if (need_return_to_2) begin
                         // 处于“还要自动回2楼”的中间点，不立即清 led 和 need_return_to_2，
                         // 在上行结束到2楼空闲时清。
-                        led[1] <= 0;
-                        led[3] <= 0;
-                        led[0] <= led[0];
-                        led[2] <= led[2];
+                        led[0] <= 0;
+                        led[2] <= 0;
+                        led[1] <= led[1];
+                        led[3] <= led[3];
                     end
                     else begin
                         led <= 0;              // 正常回到1楼：清除所有请求
@@ -195,10 +235,10 @@ end
                     sx   <= 2'b00;
                     if (need_return_to_1) begin
                         // 仍然处在“需要自动回1楼”的中途，不清 led
-                        led[0] <= 0;
-                        led[2] <= 0;
-                        led[1] <= led[1];
-                        led[3] <= led[3];
+                        led[1] <= 0;
+                        led[3] <= 0;
+                        led[0] <= led[0];
+                        led[2] <= led[2];
                     end
                     else begin
                         // 普通到2楼空闲时可以选择保持或清零
@@ -252,7 +292,7 @@ end
 
                 // 下行：从2楼到1楼
                 ST_DOWN: begin
-                    if (cnt < CntMax*1/4)
+                    if (cnt > CntMax*3/4)
                         fx <= 0;
                     else
                         fx <= 1;
@@ -337,6 +377,31 @@ end
                     unit  <= 0;
                 end
                 else begin
+                    case(state)
+                        ST_UP: begin
+                        seg_len = CntMax / 40;
+                        remain  = cnt;
+                        idx = remain / seg_len;
+                        sigma <= idx / 10;
+                        unit  <= idx % 10;      
+                        end
+                        ST_DOWN: begin
+                        seg_len = CntMax / 40;
+                        remain  = cnt;
+                        idx = remain / seg_len;
+                        sigma <= (40-idx) / 10;
+                        unit  <= (40-idx) % 10;    
+                        end
+                        ST_FORCE_1: begin//正计时显示已经上升了多长时间
+                        seg_len = CntMax / 40;
+                        remain  = cntv;
+                        idx = remain / seg_len;
+                        sigma <= idx / 10;
+                        unit  <= idx % 10;   
+                        end
+
+            default:begin 
+
                     // 把 4 秒分成 40 份，每份 0.1s
                     // seg_len = CntMax / 40（定值，可综合成常量）
                     seg_len = CntMax / 40;
@@ -354,6 +419,8 @@ end
                     // sigma = idx / 10, unit = idx % 10
                     sigma <= idx / 10;        // 3..0
                     unit  <= idx % 10;        // 9..0
+            end
+                    endcase
                 end
             end
         end

@@ -47,8 +47,8 @@ module intepret(
         else begin
             if(cnt<100_000_000-1) begin
                 cnt<=cnt+1;
-            data_segsx <= 8'b11101100; 
-            data_segfx <= 8'b11111100; 
+            data_segfx <= 8'b11101100; 
+            data_segsx <= 8'b11111100; 
             data_segtime0 <= 8'b00000000; 
             data_segtime1 <= 8'b00000000; //
 

@@ -22,8 +22,8 @@
 
 module top(
     input clk,//50MHz
-    input rst,
-    input en,
+    input rstv,
+    input env,
     input [3:0] key,
     output wire  [3:0] state_led ,
     output wire buzzer,
@@ -33,6 +33,8 @@ module top(
     output [5:0] data_dig
 
     );
+    wire en=~env;
+    wire rst=~rstv;
     assign row = 4'b1110; // 扫描第一行
     wire [3:0] key_xd;
     wire clk_20MHz;
